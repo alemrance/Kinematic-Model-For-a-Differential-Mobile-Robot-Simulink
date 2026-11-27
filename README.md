@@ -2,64 +2,76 @@
 
 A step-by-step Simulink test kit for differential drive mobile robots. The goal is to model kinematics, actuators, sensors, localization, planning and control in simulation, so that real-world behavior can be anticipated **before working on hardware**.
 
-> **Status:** Work in progress. Tasks 1–2 (kinematics, odometry, gyro) are in place; see the [Roadmap](#roadmap).
+> **Status:** Work in progress. Task 1 (robot model) and Task 2 (localization with EKF) are complete; see the [Roadmap](#roadmap).
 
 ---
 
 ## Requirements
 
-- MATLAB & Simulink (developed on R2026a)
+- MATLAB & Simulink **R2026a**
 - Robotics System Toolbox (Differential Drive Kinematic Model block)
 - Navigation Toolbox (planned for later tasks)
 
 ## Getting Started
 
-1. Clone the repository and open the folder in MATLAB.
-2. Load the robot parameters:
+1. Clone the repository and open the folder in MATLAB (keep it as the *Current Folder*).
+2. Load the parameters:
    ```matlab
    init_robot
    ```
-   > If the model's *InitFcn* callback is set to `init_robot` (*Model Settings → Model Properties → Callbacks*), this runs automatically before every simulation.
-3. Open and run the model:
+   > Tip: set *Model Settings → Model Properties → Callbacks → InitFcn* to `init_robot` so it runs automatically before every simulation.
+3. Run the model and generate the result figures:
    ```matlab
-   open_system('mobile_robot_model.slx')
    out = sim('mobile_robot_model');
+   plot_results
    ```
-4. Plot the true path vs. odometry estimate:
-   ```matlab
-   s = squeeze(out.robotState.Data); if size(s,1)==3, s = s.'; end
-   p = squeeze(out.odomPose.Data);   if size(p,1)==3, p = p.'; end
-   plot(s(:,1), s(:,2), 'b', p(:,1), p(:,2), 'r--'); axis equal; grid on
-   legend('Ground truth', 'Odometry')
-   ```
+   `plot_results` prints an error summary table and saves all figures to `images/`.
 
-## Robot Parameters (`init_robot.m`)
+## Parameters (`init_robot.m`)
 
 | Parameter | Value | Description |
 |---|---|---|
 | `r` | 0.045 m | Wheel radius |
 | `L` | 0.2194 m | Track width (distance between wheels) |
 | `x0` | [0; 0; 0] | Initial pose [x; y; θ] |
-| `Ts` | 0.01 s | Sample time (fixed-step, ode4) |
+| `Ts` | 0.01 s | Base sample time: simulation, encoders, gyro, EKF (fixed-step, ode4) |
+| `posSensor` | `'demo'` | Absolute position sensor profile (see below) |
+| `sig_pos` | profile | Position sensor noise σ [m] |
+| `Ts_pos` | profile | Position sensor sample time [s] |
+
+**Position sensor profiles** – the sensor is modeled generically as *true position + Gaussian noise, sampled every `Ts_pos`*, so one block covers several real technologies:
+
+| Profile | σ | Rate | Represents |
+|---|---|---|---|
+| `demo` | 0.10 m | 1 Hz | Teaching setting – drift between updates is clearly visible |
+| `uwb` | 0.10 m | 10 Hz | UWB indoor positioning |
+| `rtk` | 0.02 m | 10 Hz | RTK-GNSS (outdoor) |
+| `lidar_loc` | 0.03 m | 10 Hz | Lidar map-based localization (AMCL / scan matching) |
 
 ## Model Overview
 
 ```
-v, ω command ─► Inverse Kinematics ─► Motor lag 1/(0.2s+1) ─► Saturation ±20 rad/s ─► Diff Drive Kinematic Model ─► true pose
-                                                                       │
-                                     encoder noise ─► Odometry (+ gyro) ─► Integrator ─► estimated pose ─► error vs. true pose
+v, ω ─► Inverse kinematics ─► Motor lag + saturation ─► Diff Drive Kinematic Model ─► ground-truth pose
+                                     │                                    │
+                           encoders + noise                 gyro (ω + noise + bias)      position sensor
+                                     │                                    │            (x, y + noise, every Ts_pos)
+                                     ▼                                    ▼                       │
+              Odometry (encoders) │ Odometry + gyro │ EKF (encoders + gyro + position sensor) ◄─────┘
+                                     └──────── estimated poses ─► error vs. ground truth
 ```
 
 | Block | Purpose |
 |---|---|
 | Inverse kinematics (MATLAB Function) | Converts linear/angular velocity (v, ω) into left/right wheel speeds |
-| Transfer Fcn + Saturation | First-order motor response and wheel speed limits |
+| Transfer Fcn + Saturation | First-order motor response (τ = 0.2 s) and wheel speed limits (±20 rad/s) |
 | Differential Drive Kinematic Model | Ground-truth robot motion |
-| Odometry (MATLAB Function + Integrator) | Pose estimate from (noisy) wheel encoders |
-| Gyro model | True ω + Gaussian noise + constant bias |
-| Odometry + gyro | Heading from gyro, forward speed from encoders |
+| Encoder model | Wheel speed + Gaussian noise (σ = 0.5 rad/s) |
+| Gyro model | True ω + Gaussian noise (σ = 0.02 rad/s) + constant bias (−0.005 rad/s) |
+| Absolute position sensor | True x, y + Gaussian noise, sampled every `Ts_pos` |
+| Odometry / Odometry + gyro | Dead-reckoning pose estimates (MATLAB Function + Integrator) |
+| **EKF** | Fuses encoders + gyro (prediction, every `Ts`) with the position sensor (correction, every `Ts_pos`) – see [docs/EKF.md](docs/EKF.md) |
 
-## Verification Tests
+## Verification Tests (Task 1)
 
 Wheel speeds in rad/s, 20 s simulation:
 
@@ -72,35 +84,53 @@ Wheel speeds in rad/s, 20 s simulation:
 
 For constant v and ω the robot follows a circle with radius **R = v/ω** and period **T = 2π/ω**.
 
-## Results So Far
+## Results (Task 2 – Localization)
 
-- **Noise-free odometry** matches ground truth exactly (error ≈ 0).
-- **Encoder noise** (σ = 0.5 rad/s): heading error grows as a random walk (~0.3 rad after 60 s); x/y errors oscillate with the lap period and grow with the heading error.
-- **Gyro heading** (σ = 0.02 rad/s, bias 0.005 rad/s): noise is largely removed, but bias causes a linear heading drift (≈ −0.3 rad after 60 s).
-- **Conclusion:** dead reckoning alone always drifts → an absolute position sensor and an EKF are needed (next task).
+Scenario: v = 0.5 m/s, ω = 0.5 rad/s (1 m circle), 60 s, `demo` sensor profile. Errors are *ground truth − estimate*, RMS over t > 5 s:
 
-Run `plot_results` after a simulation to regenerate these figures.
+| Method | RMS position error | RMS heading error | Behaviour |
+|---|---|---|---|
+| Encoders only | 0.204 m | 0.178 rad | Heading drifts as a random walk; position error grows without bound |
+| Encoders + gyro | 0.200 m | 0.199 rad | Noise removed, but gyro bias causes linear heading drift |
+| **EKF** | **0.060 m** | **0.052 rad** | **Error stays bounded**; 100 % of samples inside the EKF's ±3σ bounds |
+
+Key takeaways:
+- Dead reckoning alone **always drifts**, regardless of sensor quality.
+- An absolute position sensor does not drift but is noisy and slow; the EKF combines the strengths of both.
+- The EKF also corrects heading, even though the position sensor does not measure θ (via the x/y–θ correlation in the covariance matrix).
+- The remaining small heading offset comes from the **unmodeled gyro bias** – next step: estimate it as a 4th EKF state.
 
 ![XY paths](images/xy_paths.png)
+![EKF pose error with 3-sigma bounds](images/error_ekf.png)
+![Heading error comparison](images/heading_error_comparison.png)
+
+<details>
+<summary>Dead-reckoning error plots</summary>
+
 ![Pose error - encoders only](images/error_odometry.png)
 ![Pose error - gyro](images/error_gyro.png)
-![Heading error comparison](images/heading_error_comparison.png)
+</details>
 
 ## Roadmap
 
 - [x] **Task 1 – Robot model:** kinematics, inverse kinematics, motor lag, saturation
-- [ ] **Task 2 – Localization:** ~~odometry~~ ✓, ~~gyro~~ ✓, position sensor, EKF
-- [ ] **Task 3 – Obstacle detection & tracking:** lidar simulation, clustering, Kalman tracking
+- [x] **Task 2 – Localization:** odometry, gyro, absolute position sensor, EKF
+  - [ ] Q/R tuning study
+  - [ ] Gyro bias as an EKF state
+  - [ ] Replace custom sensors with MATLAB IMU / GPS blocks
+- [ ] **Task 3 – Map, lidar & obstacle detection:** occupancy map, lidar simulation, clustering, Kalman tracking, lidar localization
 - [ ] **Task 4 – Path planning:** A*, RRT*, Hybrid A* on occupancy maps
 - [ ] **Task 5 – Control:** PID, Pure Pursuit, Stanley, LQR, MPC comparison
 
 ## Repository Structure
 
 ```
-├── init_robot.m      # robot parameters
-├── plot_results.m    # result figures for this README
+├── init_robot.m              # parameters and sensor profiles
 ├── mobile_robot_model.slx    # Simulink model
-├── images/           # screenshots for this README
+├── plot_results.m            # result figures + error summary
+├── docs/
+│   └── EKF.md                # EKF theory and code walkthrough
+├── images/                   # figures used in this README
 ├── .gitignore
 └── .gitattributes
 ```
